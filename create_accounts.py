@@ -4,7 +4,7 @@ from config import BASE_URL, TOTAL_ACCOUNTS
 accounts = []
 
 for i in range(TOTAL_ACCOUNTS):
-    name = f"bot_{i+1}"
+    name = f"kewan_{i+1}"
     r = requests.post(
         f"{BASE_URL}/accounts",
         json={"name": name}
