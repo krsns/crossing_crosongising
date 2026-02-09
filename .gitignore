@@ -1,5 +1,4 @@
-venv/
-backup/
-config/agents.json
+accounts.json
+accounts_backup.json
+__pycache__/
 *.log
-.env
