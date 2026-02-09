@@ -1,0 +1,5 @@
+venv/
+backup/
+config/agents.json
+*.log
+.env
