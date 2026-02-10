@@ -1,4 +1,4 @@
-import requests, json, time, random, traceback, os
+import requests, json, time, random, traceback, os, sys
 from datetime import datetime
 from config import *
 
@@ -7,8 +7,54 @@ ACCOUNTS_BACKUP = "accounts_backup.json"
 PAYLOAD_FILE = "payloads.json"
 PAYLOAD_BACKUP = "payloads_backup.json"
 
+STATE_WAIT_SLEEP = 5
+MAX_STATE_WAIT = 120
+MAX_GAME_RUNNING_WAIT = 60
 
-# ========= UTILS =========
+SPIN = ["|", "/", "-", "\\"]
+
+# ================ DASHBOARD (FIX) ================
+def dash_render(header1, header2, bot_lines):
+    # Cursor home + clear screen, then redraw (stable in screen)
+    sys.stdout.write("\033[H")   # home
+    sys.stdout.write("\033[2J")  # clear
+    sys.stdout.write(header1 + "\n")
+    sys.stdout.write(header2 + "\n")
+    for ln in bot_lines:
+        sys.stdout.write(ln[:240] + "\n")
+    sys.stdout.flush()
+
+def clip(x, n=8):
+    x = str(x) if x is not None else "-"
+    return x[:n]
+
+def fmt_line(acc, s, spin_i):
+    name = acc["name"]
+    bal  = str(s.get("moltz", 0))
+    gsts = str(s.get("gstatus", "-"))
+    turn = str(s.get("turn", "?"))
+    hp   = str(s.get("hp", "-"))
+    ep   = str(s.get("ep", "-"))
+    act  = str(s.get("action", "-"))
+    note = str(s.get("note", ""))
+
+    sp = SPIN[spin_i % len(SPIN)]
+    return (
+        f"{name:<6} [{sp}] "
+        f"Moltz={bal:<6} "
+        f"Game={gsts:<9} Turn={turn:<4} "
+        f"HP={hp:<3} EP={ep:<3} "
+        f"Act={act:<6} "
+        f"{note}"
+    )
+
+def render_all(accounts, status_map, spin_i, target_game_id=""):
+    header1 = f"MODE: one-game | accounts={len(accounts)} | target={clip(target_game_id) if target_game_id else '-'} | BASE_URL={BASE_URL}"
+    header2 = "Name   Spin Moltz   Game      Turn HP  EP  Act    Note"
+    bot_lines = [fmt_line(acc, status_map[acc["name"]], spin_i) for acc in accounts]
+    dash_render(header1, header2, bot_lines)
+
+# ================= Utils =================
 def load_accounts():
     with open(ACCOUNTS_FILE) as f:
         return json.load(f)
@@ -22,8 +68,8 @@ def save_accounts(accs):
 def safe_json(resp):
     try:
         return resp.json()
-    except:
-        return {}
+    except Exception:
+        return {"_status": getattr(resp, "status_code", None), "_raw": getattr(resp, "text", "")}
 
 def get_account_info(api_key):
     r = requests.get(
@@ -35,73 +81,106 @@ def get_account_info(api_key):
 
 def save_payload(acc, payload):
     data = {}
-
     if os.path.exists(PAYLOAD_FILE):
         with open(PAYLOAD_FILE, "r") as f:
             data = json.load(f)
 
     data[acc["name"]] = {
         "apiKey": acc["apiKey"],
-        "gameId": acc["gameId"],
-        "agentId": acc["agentId"],
+        "gameId": acc.get("gameId"),
+        "agentId": acc.get("agentId"),
         "payload": payload,
         "timestamp": datetime.utcnow().isoformat()
     }
 
     with open(PAYLOAD_FILE, "w") as f:
         json.dump(data, f, indent=2)
-
     with open(PAYLOAD_BACKUP, "w") as f:
         json.dump(data, f, indent=2)
 
-    print(f"[PAYLOAD SAVED] {acc['name']}")
+def pick_target_game(headers):
+    r = requests.get(f"{BASE_URL}/games?status=waiting", timeout=10)
+    games = safe_json(r).get("data", [])
+    if games:
+        return games[0]
+    r = requests.post(f"{BASE_URL}/games", headers=headers, timeout=10)
+    return safe_json(r).get("data")
 
-def wait_game_running(game_id):
+def wait_game_running(game_id, status_map):
+    loops = 0
     while True:
+        loops += 1
         r = requests.get(f"{BASE_URL}/games/{game_id}", timeout=10)
         res = safe_json(r)
-        status = res.get("data", {}).get("status")
+        data = res.get("data", {})
+        status = data.get("status")
+        turn = data.get("turn", "?")
+
+        for k in status_map:
+            status_map[k]["gstatus"] = status or "-"
+            status_map[k]["turn"] = turn
 
         if status == "running":
-            print(f"[RUNNING] game {game_id}")
-            return
+            return True, data
+        if status in ("finished", "cancelled"):
+            return False, data
+        if loops >= MAX_GAME_RUNNING_WAIT:
+            return False, data
 
-        print(f"[WAIT] game {game_id} belum running...")
-        time.sleep(15)
+        time.sleep(STATE_WAIT_SLEEP)
 
-
-# ========= MAIN =========
+# ================= MAIN =================
 accounts = load_accounts()
-print(f"[START] total accounts: {len(accounts)}")
+for acc in accounts:
+    acc.setdefault("stateWait", 0)
+
+status_map = {
+    acc["name"]: {"moltz": 0, "gstatus": "-", "turn": "?", "hp": "-", "ep": "-", "action": "-", "note": ""}
+    for acc in accounts
+}
+
+spin_i = 0
+target_game_id = ""
+
+# clear once at start (home+clear)
+sys.stdout.write("\033[H\033[2J")
+sys.stdout.flush()
 
 while True:
     try:
+        render_all(accounts, status_map, spin_i, target_game_id); spin_i += 1
+
+        first_headers = {"X-API-Key": accounts[0]["apiKey"]}
+        game = pick_target_game(first_headers)
+        if not game:
+            for acc in accounts:
+                status_map[acc["name"]]["note"] = "ERROR pick/create game"
+            render_all(accounts, status_map, spin_i, target_game_id); spin_i += 1
+            time.sleep(5)
+            continue
+
+        target_game_id = game["id"]
+        for acc in accounts:
+            status_map[acc["name"]]["note"] = "target set"
+
+        ok, _ = wait_game_running(target_game_id, status_map)
+        if not ok:
+            for acc in accounts:
+                status_map[acc["name"]]["note"] = "waiting game... retry"
+            render_all(accounts, status_map, spin_i, target_game_id); spin_i += 1
+            time.sleep(2)
+            continue
+
+        # register all agents to same game
         for acc in accounts:
             headers = {"X-API-Key": acc["apiKey"]}
 
-            # ===== ACCOUNT INFO =====
             info = get_account_info(acc["apiKey"])
-            balance = info.get("balance", 0)
-            print(f"\n[ACCOUNT] {acc['name']} | Moltz: {balance}")
+            status_map[acc["name"]]["moltz"] = info.get("balance", 0)
 
-            # ===== JOIN GAME =====
-            if not acc.get("gameId"):
-                r = requests.get(f"{BASE_URL}/games?status=waiting", timeout=10)
-                games = safe_json(r).get("data", [])
-
-                if games:
-                    game = games[0]
-                else:
-                    game = safe_json(
-                        requests.post(f"{BASE_URL}/games", headers=headers, timeout=10)
-                    ).get("data")
-
-                if not game:
-                    print("[ERROR] gagal create/join game")
-                    time.sleep(10)
-                    continue
-
-                acc["gameId"] = game["id"]
+            if acc.get("gameId") != target_game_id or not acc.get("agentId"):
+                acc["gameId"] = target_game_id
+                status_map[acc["name"]]["note"] = "register..."
 
                 agent = safe_json(
                     requests.post(
@@ -113,85 +192,109 @@ while True:
                 ).get("data")
 
                 if not agent:
-                    print(f"[ERROR] register agent gagal {acc['name']}")
-                    time.sleep(10)
+                    status_map[acc["name"]]["note"] = "register failed"
+                    render_all(accounts, status_map, spin_i, target_game_id); spin_i += 1
+                    time.sleep(1)
                     continue
 
                 acc["agentId"] = agent["id"]
                 save_accounts(accounts)
+                status_map[acc["name"]]["note"] = "joined"
 
-                print(f"[JOINED] {acc['name']} → {acc['gameId']}")
-                wait_game_running(acc["gameId"])
-                time.sleep(3)
-                continue
+            render_all(accounts, status_map, spin_i, target_game_id); spin_i += 1
 
-            # ===== GAME INFO =====
-            game_info = safe_json(
-                requests.get(f"{BASE_URL}/games/{acc['gameId']}", timeout=10)
-            ).get("data", {})
+        # action loop
+        while True:
+            game_info = safe_json(requests.get(f"{BASE_URL}/games/{target_game_id}", timeout=10)).get("data", {})
+            status = game_info.get("status")
+            turn = game_info.get("turn", "?")
+            for acc in accounts:
+                status_map[acc["name"]]["gstatus"] = status or "-"
+                status_map[acc["name"]]["turn"] = turn
 
-            print(
-                f"[GAME] {acc['gameId']} | status={game_info.get('status')} "
-                f"| turn={game_info.get('turn', '?')}"
-            )
+            if status in ("finished", "cancelled"):
+                for acc in accounts:
+                    acc["gameId"] = None
+                    acc["agentId"] = None
+                    acc["stateWait"] = 0
+                    status_map[acc["name"]]["note"] = f"game {status}, reset"
+                save_accounts(accounts)
+                render_all(accounts, status_map, spin_i, target_game_id); spin_i += 1
+                break
 
-            # ===== GET STATE =====
-            r = requests.get(
-                f"{BASE_URL}/games/{acc['gameId']}/agents/{acc['agentId']}/state",
-                headers=headers,
-                timeout=10
-            )
+            for acc in accounts:
+                headers = {"X-API-Key": acc["apiKey"]}
 
-            res = safe_json(r)
-            if "data" not in res:
-                print(f"[WAIT] {acc['name']} state belum siap")
-                time.sleep(10)
-                continue
+                # update Moltz (kalau berat, nanti kita bikin interval)
+                info = get_account_info(acc["apiKey"])
+                status_map[acc["name"]]["moltz"] = info.get("balance", 0)
 
-            state = res["data"]
-            hp = state.get("hp", 0)
-            ep = state.get("ep", 0)
-            atk = state.get("attack", 0)
-            df = state.get("defense", 0)
-            kills = state.get("kills", 0)
+                r = requests.get(
+                    f"{BASE_URL}/games/{acc['gameId']}/agents/{acc['agentId']}/state",
+                    headers=headers,
+                    timeout=10
+                )
+                res = safe_json(r)
 
-            print(f"[STATE] HP:{hp} EP:{ep} ATK:{atk} DEF:{df} KILL:{kills}")
+                if "data" not in res:
+                    acc["stateWait"] += 1
+                    status_map[acc["name"]]["note"] = f"state wait {acc['stateWait']}"
+                    status_map[acc["name"]]["action"] = "-"
+                    render_all(accounts, status_map, spin_i, target_game_id); spin_i += 1
 
-            # ===== DECISION =====
-            if hp < LOW_HP_THRESHOLD or ep <= 2:
-                action = {"type": "rest"}
-            else:
-                action = random.choice([
-                    {"type": "move"},
-                    {"type": "pickup"},
-                    {"type": "talk"}
-                ])
+                    if acc["stateWait"] >= MAX_STATE_WAIT:
+                        acc["gameId"] = None
+                        acc["agentId"] = None
+                        acc["stateWait"] = 0
+                        save_accounts(accounts)
+                        status_map[acc["name"]]["note"] = "state timeout, reset"
+                        render_all(accounts, status_map, spin_i, target_game_id); spin_i += 1
 
-            print(f"[DECISION] {acc['name']} → {action['type']}")
+                    time.sleep(STATE_WAIT_SLEEP)
+                    continue
 
-            # ===== SEND ACTION =====
-            r = requests.post(
-                f"{BASE_URL}/games/{acc['gameId']}/agents/{acc['agentId']}/action",
-                headers=headers,
-                json={"action": action},
-                timeout=10
-            )
+                acc["stateWait"] = 0
+                state = res["data"]
+                hp = state.get("hp", 0)
+                ep = state.get("ep", 0)
+                atk = state.get("attack", 0)
+                df = state.get("defense", 0)
+                kills = state.get("kills", 0)
 
-            res = safe_json(r)
+                status_map[acc["name"]]["hp"] = hp
+                status_map[acc["name"]]["ep"] = ep
 
-            # ===== SAVE PAYLOAD IF ANY =====
-            payload = res.get("data", {}).get("claimPayload")
-            if payload:
-                save_payload(acc, payload)
+                if hp < LOW_HP_THRESHOLD or ep <= 2:
+                    action = {"type": "rest"}
+                else:
+                    action = random.choice([{"type": "move"}, {"type": "move"}, {"type": "pickup"}, {"type": "talk"}])
 
-            print(f"[ACTION SENT] {acc['name']} → {action['type']}")
-            print("-" * 45)
+                status_map[acc["name"]]["action"] = action["type"]
+                status_map[acc["name"]]["note"] = f"ATK={atk} DEF={df} K={kills}"
+                render_all(accounts, status_map, spin_i, target_game_id); spin_i += 1
 
-            time.sleep(random.randint(*ACCOUNT_DELAY))
+                r = requests.post(
+                    f"{BASE_URL}/games/{acc['gameId']}/agents/{acc['agentId']}/action",
+                    headers=headers,
+                    json={"action": action},
+                    timeout=10
+                )
+                res2 = safe_json(r)
 
-        time.sleep(ACTION_INTERVAL)
+                payload = res2.get("data", {}).get("claimPayload")
+                if payload:
+                    save_payload(acc, payload)
+                    status_map[acc["name"]]["note"] = "payload saved"
 
-    except Exception:
-        print("🔥 BOT ERROR, AUTO RESTART 🔥")
-        traceback.print_exc()
-        time.sleep(15)
+                render_all(accounts, status_map, spin_i, target_game_id); spin_i += 1
+                time.sleep(random.randint(*ACCOUNT_DELAY))
+
+            time.sleep(ACTION_INTERVAL)
+
+    except Exception as e:
+        # jangan print traceback ke layar dashboard
+        err = f"{type(e).__name__}"
+        for acc in accounts:
+            status_map[acc["name"]]["note"] = f"ERROR {err}"
+        render_all(accounts, status_map, spin_i, target_game_id); spin_i += 1
+        time.sleep(5)
