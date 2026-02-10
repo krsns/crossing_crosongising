@@ -35,22 +35,26 @@ def fmt_line(acc, s, spin_i):
     turn = str(s.get("turn", "?"))
     hp   = str(s.get("hp", "-"))
     ep   = str(s.get("ep", "-"))
+    atk  = str(s.get("atk", "-"))
+    deff = str(s.get("def", "-"))
+    k    = str(s.get("kills", "-"))
     act  = str(s.get("action", "-"))
     note = str(s.get("note", ""))
 
     sp = SPIN[spin_i % len(SPIN)]
     return (
-        f"{name:<6} [{sp}] "
-        f"Moltz={bal:<6} "
-        f"Game={gsts:<9} Turn={turn:<4} "
+        f"{name:<10} [{sp}] "
+        f"M={bal:<6} "
+        f"G={gsts:<9} T={turn:<4} "
         f"HP={hp:<3} EP={ep:<3} "
-        f"Act={act:<6} "
+        f"A={atk:<3} D={deff:<3} K={k:<2} "
+        f"Do={act:<6} "
         f"{note}"
     )
 
 def render_all(accounts, status_map, spin_i, target_game_id=""):
     header1 = f"MODE: one-game | accounts={len(accounts)} | target={clip(target_game_id) if target_game_id else '-'} | BASE_URL={BASE_URL}"
-    header2 = "Name   Spin Moltz   Game      Turn HP  EP  Act    Note"
+    header2 = "Name       Spin Moltz  Game      Turn HP  EP  A   D   K  Do     Note"
     bot_lines = [fmt_line(acc, status_map[acc["name"]], spin_i) for acc in accounts]
     dash_render(header1, header2, bot_lines)
 
@@ -129,13 +133,83 @@ def wait_game_running(game_id, status_map):
 
         time.sleep(STATE_WAIT_SLEEP)
 
+# ================= SMART STRATEGY =================
+def weighted_choice(choices):
+    """Weighted random selection"""
+    actions = list(choices.keys())
+    weights = list(choices.values())
+    return random.choices(actions, weights=weights, k=1)[0]
+
+def get_smart_action(hp, ep, atk, defense, turn):
+    """Smart strategy - returns action dict"""
+    
+    # CRITICAL - emergency rest
+    if hp <= 20 or ep <= 5:
+        return {"type": "rest"}
+    
+    # LOW RESOURCES - defensive
+    if hp < LOW_HP_THRESHOLD or ep <= 10:
+        return {"type": "rest"}
+    
+    # EARLY GAME (1-20): FARM items
+    if turn <= 20:
+        return weighted_choice({
+            "pickup": 0.7,  # 70% pickup
+            "move": 0.2,    # 20% move
+            "rest": 0.1     # 10% rest
+        })
+    
+    # MID GAME (21-60): Balanced
+    elif turn <= 60:
+        # Strong stats = fight
+        if atk >= 12 and hp >= 45 and ep >= 20:
+            return weighted_choice({
+                "attack": 0.3,
+                "pickup": 0.4,
+                "move": 0.2,
+                "rest": 0.1
+            })
+        else:
+            # Weak = keep farming
+            return weighted_choice({
+                "pickup": 0.6,
+                "move": 0.3,
+                "rest": 0.1
+            })
+    
+    # LATE GAME (61+): Aggressive
+    else:
+        # BEAST MODE - very strong
+        if atk >= 17 and hp >= 60 and ep >= 30:
+            return weighted_choice({
+                "attack": 0.6,   # 60% attack!
+                "move": 0.25,
+                "pickup": 0.1,
+                "rest": 0.05
+            })
+        # SURVIVE MODE - weak
+        elif atk < 12:
+            return weighted_choice({
+                "move": 0.5,
+                "pickup": 0.3,
+                "rest": 0.2
+            })
+        # BALANCED
+        else:
+            return weighted_choice({
+                "attack": 0.4,
+                "move": 0.3,
+                "pickup": 0.2,
+                "rest": 0.1
+            })
+
 # ================= MAIN =================
 accounts = load_accounts()
 for acc in accounts:
     acc.setdefault("stateWait", 0)
 
 status_map = {
-    acc["name"]: {"moltz": 0, "gstatus": "-", "turn": "?", "hp": "-", "ep": "-", "action": "-", "note": ""}
+    acc["name"]: {"moltz": 0, "gstatus": "-", "turn": "?", "hp": "-", "ep": "-", "atk": "-", "def": "-", "kills": "-", "action": "-", "note": ""}
     for acc in accounts
 }
 
@@ -263,14 +337,15 @@ while True:
 
                 status_map[acc["name"]]["hp"] = hp
                 status_map[acc["name"]]["ep"] = ep
+                status_map[acc["name"]]["atk"] = atk
+                status_map[acc["name"]]["def"] = df
+                status_map[acc["name"]]["kills"] = kills
 
-                if hp < LOW_HP_THRESHOLD or ep <= 2:
-                    action = {"type": "rest"}
-                else:
-                    action = random.choice([{"type": "move"}, {"type": "move"}, {"type": "pickup"}, {"type": "talk"}])
+                # === SMART STRATEGY (IMPROVED!) ===
+                action = get_smart_action(hp, ep, atk, df, turn)
 
                 status_map[acc["name"]]["action"] = action["type"]
-                status_map[acc["name"]]["note"] = f"ATK={atk} DEF={df} K={kills}"
+                status_map[acc["name"]]["note"] = f"A{atk} D{df} K{kills}"
                 render_all(accounts, status_map, spin_i, target_game_id); spin_i += 1
 
                 r = requests.post(
