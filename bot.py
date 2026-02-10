@@ -13,9 +13,8 @@ MAX_GAME_RUNNING_WAIT = 60
 
 SPIN = ["|", "/", "-", "\\"]
 
-# ================ DASHBOARD (FIX) ================
+# ================ DASHBOARD (IMPROVED) ================
 def dash_render(header1, header2, bot_lines):
-    # Cursor home + clear screen, then redraw (stable in screen)
     sys.stdout.write("\033[H")   # home
     sys.stdout.write("\033[2J")  # clear
     sys.stdout.write(header1 + "\n")
@@ -53,7 +52,7 @@ def fmt_line(acc, s, spin_i):
     )
 
 def render_all(accounts, status_map, spin_i, target_game_id=""):
-    header1 = f"MODE: one-game | accounts={len(accounts)} | target={clip(target_game_id) if target_game_id else '-'} | BASE_URL={BASE_URL}"
+    header1 = f"MOLTY BOT | accounts={len(accounts)} | game={clip(target_game_id) if target_game_id else '-'} | {BASE_URL}"
     header2 = "Name       Spin Moltz  Game      Turn HP  EP  A   D   K  Do     Note"
     bot_lines = [fmt_line(acc, status_map[acc["name"]], spin_i) for acc in accounts]
     dash_render(header1, header2, bot_lines)
@@ -133,7 +132,7 @@ def wait_game_running(game_id, status_map):
 
         time.sleep(STATE_WAIT_SLEEP)
 
-# ================= SMART STRATEGY =================
+# ================= SMART STRATEGY (FULL CONFIG) =================
 def weighted_choice(choices):
     """Weighted random selection"""
     actions = list(choices.keys())
@@ -141,66 +140,108 @@ def weighted_choice(choices):
     return random.choices(actions, weights=weights, k=1)[0]
 
 def get_smart_action(hp, ep, atk, defense, turn):
-    """Smart strategy - returns action dict"""
+    """
+    Advanced AI strategy using all config parameters
+    Returns: action dict
+    """
     
-    # CRITICAL - emergency rest
-    if hp <= 20 or ep <= 5:
+    # === CRITICAL EMERGENCY ===
+    if hp <= CRITICAL_HP:
         return {"type": "rest"}
     
-    # LOW RESOURCES - defensive
-    if hp < LOW_HP_THRESHOLD or ep <= 10:
+    if ep <= CRITICAL_EP:
         return {"type": "rest"}
     
-    # EARLY GAME (1-20): FARM items
-    if turn <= 20:
+    # === DEFENSIVE MODE - Low resources ===
+    if hp < LOW_HP_THRESHOLD:
+        return {"type": "rest"}
+    
+    if ep < LOW_EP_THRESHOLD:
+        # If HP also low, rest. Otherwise just move to save EP
+        if hp < 60:
+            return {"type": "rest"}
+        else:
+            return {"type": "move"}
+    
+    # === PHASE 1: EARLY GAME (Turn 1-20) - FARMING ===
+    if turn <= EARLY_GAME_TURNS:
         return weighted_choice({
-            "pickup": 0.7,  # 70% pickup
-            "move": 0.2,    # 20% move
-            "rest": 0.1     # 10% rest
+            "pickup": EARLY_PICKUP_WEIGHT,
+            "move": EARLY_MOVE_WEIGHT,
+            "rest": EARLY_REST_WEIGHT
         })
     
-    # MID GAME (21-60): Balanced
-    elif turn <= 60:
-        # Strong stats = fight
-        if atk >= 12 and hp >= 45 and ep >= 20:
+    # === PHASE 2: MID GAME (Turn 21-60) - BALANCED ===
+    elif turn <= MID_GAME_TURNS:
+        # Check if stats are good enough to fight
+        if (atk >= MIN_ATTACK_TO_FIGHT and 
+            hp >= MIN_HP_TO_FIGHT and 
+            ep >= MIN_EP_TO_FIGHT):
+            
+            # Strong agent - can attack
             return weighted_choice({
-                "attack": 0.3,
-                "pickup": 0.4,
-                "move": 0.2,
-                "rest": 0.1
+                "attack": MID_ATTACK_WEIGHT,
+                "pickup": MID_PICKUP_WEIGHT,
+                "move": MID_MOVE_WEIGHT,
+                "rest": MID_REST_WEIGHT
             })
         else:
-            # Weak = keep farming
+            # Weak agent - keep farming
             return weighted_choice({
                 "pickup": 0.6,
                 "move": 0.3,
                 "rest": 0.1
             })
     
-    # LATE GAME (61+): Aggressive
+    # === PHASE 3: LATE GAME (Turn 61+) - AGGRESSIVE ===
     else:
-        # BEAST MODE - very strong
-        if atk >= 17 and hp >= 60 and ep >= 30:
+        # Adjust HP threshold if high defense
+        hp_threshold = MIN_HP_TO_FIGHT
+        if defense >= DEFENSE_THRESHOLD:
+            hp_threshold -= HIGH_DEFENSE_HP_BONUS
+        
+        # BEAST MODE - very strong stats
+        if (atk >= MIN_ATTACK_TO_FIGHT + 5 and 
+            hp >= hp_threshold + 15 and 
+            ep >= MIN_EP_TO_FIGHT + 10):
+            
             return weighted_choice({
-                "attack": 0.6,   # 60% attack!
+                "attack": 0.6,   # 60% attack - hunt mode!
                 "move": 0.25,
                 "pickup": 0.1,
                 "rest": 0.05
             })
-        # SURVIVE MODE - weak
-        elif atk < 12:
+        
+        # SURVIVE MODE - weak stats in late game
+        elif atk < MIN_ATTACK_TO_FIGHT:
+            if ep > 25:
+                return weighted_choice({
+                    "pickup": 0.5,  # desperate farming
+                    "move": 0.35,
+                    "rest": 0.15
+                })
+            else:
+                return weighted_choice({
+                    "move": 0.5,
+                    "rest": 0.5
+                })
+        
+        # TANK MODE - high defense build
+        elif defense >= DEFENSE_THRESHOLD:
             return weighted_choice({
-                "move": 0.5,
-                "pickup": 0.3,
-                "rest": 0.2
+                "attack": 0.45,  # More aggressive with high defense
+                "move": 0.3,
+                "pickup": 0.15,
+                "rest": 0.1
             })
-        # BALANCED
+        
+        # BALANCED MODE - normal stats
         else:
             return weighted_choice({
-                "attack": 0.4,
-                "move": 0.3,
-                "pickup": 0.2,
-                "rest": 0.1
+                "attack": LATE_ATTACK_WEIGHT,
+                "move": LATE_MOVE_WEIGHT,
+                "pickup": LATE_PICKUP_WEIGHT,
+                "rest": LATE_REST_WEIGHT
             })
 
 # ================= MAIN =================
@@ -209,14 +250,18 @@ for acc in accounts:
     acc.setdefault("stateWait", 0)
 
 status_map = {
-    acc["name"]: {"moltz": 0, "gstatus": "-", "turn": "?", "hp": "-", "ep": "-", "atk": "-", "def": "-", "kills": "-", "action": "-", "note": ""}
+    acc["name"]: {
+        "moltz": 0, "gstatus": "-", "turn": "?", 
+        "hp": "-", "ep": "-", "atk": "-", "def": "-", 
+        "kills": "-", "action": "-", "note": "init"
+    }
     for acc in accounts
 }
 
 spin_i = 0
 target_game_id = ""
 
-# clear once at start (home+clear)
+# clear once at start
 sys.stdout.write("\033[H\033[2J")
 sys.stdout.flush()
 
@@ -228,7 +273,7 @@ while True:
         game = pick_target_game(first_headers)
         if not game:
             for acc in accounts:
-                status_map[acc["name"]]["note"] = "ERROR pick/create game"
+                status_map[acc["name"]]["note"] = "ERR: no game"
             render_all(accounts, status_map, spin_i, target_game_id); spin_i += 1
             time.sleep(5)
             continue
@@ -240,7 +285,7 @@ while True:
         ok, _ = wait_game_running(target_game_id, status_map)
         if not ok:
             for acc in accounts:
-                status_map[acc["name"]]["note"] = "waiting game... retry"
+                status_map[acc["name"]]["note"] = "wait game..."
             render_all(accounts, status_map, spin_i, target_game_id); spin_i += 1
             time.sleep(2)
             continue
@@ -266,14 +311,14 @@ while True:
                 ).get("data")
 
                 if not agent:
-                    status_map[acc["name"]]["note"] = "register failed"
+                    status_map[acc["name"]]["note"] = "register FAIL"
                     render_all(accounts, status_map, spin_i, target_game_id); spin_i += 1
                     time.sleep(1)
                     continue
 
                 acc["agentId"] = agent["id"]
                 save_accounts(accounts)
-                status_map[acc["name"]]["note"] = "joined"
+                status_map[acc["name"]]["note"] = "joined OK"
 
             render_all(accounts, status_map, spin_i, target_game_id); spin_i += 1
 
@@ -291,15 +336,16 @@ while True:
                     acc["gameId"] = None
                     acc["agentId"] = None
                     acc["stateWait"] = 0
-                    status_map[acc["name"]]["note"] = f"game {status}, reset"
+                    status_map[acc["name"]]["note"] = f"END: {status}"
                 save_accounts(accounts)
                 render_all(accounts, status_map, spin_i, target_game_id); spin_i += 1
+                time.sleep(5)
                 break
 
             for acc in accounts:
                 headers = {"X-API-Key": acc["apiKey"]}
 
-                # update Moltz (kalau berat, nanti kita bikin interval)
+                # update Moltz balance
                 info = get_account_info(acc["apiKey"])
                 status_map[acc["name"]]["moltz"] = info.get("balance", 0)
 
@@ -312,7 +358,7 @@ while True:
 
                 if "data" not in res:
                     acc["stateWait"] += 1
-                    status_map[acc["name"]]["note"] = f"state wait {acc['stateWait']}"
+                    status_map[acc["name"]]["note"] = f"wait {acc['stateWait']}"
                     status_map[acc["name"]]["action"] = "-"
                     render_all(accounts, status_map, spin_i, target_game_id); spin_i += 1
 
@@ -321,7 +367,7 @@ while True:
                         acc["agentId"] = None
                         acc["stateWait"] = 0
                         save_accounts(accounts)
-                        status_map[acc["name"]]["note"] = "state timeout, reset"
+                        status_map[acc["name"]]["note"] = "TIMEOUT"
                         render_all(accounts, status_map, spin_i, target_game_id); spin_i += 1
 
                     time.sleep(STATE_WAIT_SLEEP)
@@ -335,17 +381,26 @@ while True:
                 df = state.get("defense", 0)
                 kills = state.get("kills", 0)
 
+                # update status map
                 status_map[acc["name"]]["hp"] = hp
                 status_map[acc["name"]]["ep"] = ep
                 status_map[acc["name"]]["atk"] = atk
                 status_map[acc["name"]]["def"] = df
                 status_map[acc["name"]]["kills"] = kills
 
-                # === SMART STRATEGY (IMPROVED!) ===
+                # === GET SMART ACTION (using full config) ===
                 action = get_smart_action(hp, ep, atk, df, turn)
 
+                # Determine strategy phase for note
+                if turn <= EARLY_GAME_TURNS:
+                    phase = "FARM"
+                elif turn <= MID_GAME_TURNS:
+                    phase = "MID"
+                else:
+                    phase = "LATE"
+
                 status_map[acc["name"]]["action"] = action["type"]
-                status_map[acc["name"]]["note"] = f"A{atk} D{df} K{kills}"
+                status_map[acc["name"]]["note"] = f"{phase} A{atk} D{df} K{kills}"
                 render_all(accounts, status_map, spin_i, target_game_id); spin_i += 1
 
                 r = requests.post(
@@ -359,17 +414,21 @@ while True:
                 payload = res2.get("data", {}).get("claimPayload")
                 if payload:
                     save_payload(acc, payload)
-                    status_map[acc["name"]]["note"] = "payload saved"
+                    status_map[acc["name"]]["note"] = f"{phase} SAVED"
 
                 render_all(accounts, status_map, spin_i, target_game_id); spin_i += 1
                 time.sleep(random.randint(*ACCOUNT_DELAY))
 
             time.sleep(ACTION_INTERVAL)
 
+    except KeyboardInterrupt:
+        print("\n\nBot stopped by user (Ctrl+C)")
+        save_accounts(accounts)
+        sys.exit(0)
+        
     except Exception as e:
-        # jangan print traceback ke layar dashboard
         err = f"{type(e).__name__}"
         for acc in accounts:
-            status_map[acc["name"]]["note"] = f"ERROR {err}"
+            status_map[acc["name"]]["note"] = f"ERR: {err}"
         render_all(accounts, status_map, spin_i, target_game_id); spin_i += 1
         time.sleep(5)
