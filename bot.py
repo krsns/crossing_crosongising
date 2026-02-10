@@ -7,16 +7,23 @@ ACCOUNTS_BACKUP = "accounts_backup.json"
 PAYLOAD_FILE = "payloads.json"
 PAYLOAD_BACKUP = "payloads_backup.json"
 
-STATE_WAIT_SLEEP = 5
-MAX_STATE_WAIT = 120
-MAX_GAME_RUNNING_WAIT = 60
+BLACKLIST_FILE = "blacklist_games.json"
 
+# timings
+STATE_WAIT_SLEEP = 5
+ACTION_TIMEOUT = (3, 12)     # connect, read [web:206]
+INFO_TIMEOUT = (3, 12)
+
+MAX_STATE_WAIT = 120         # 120 * 5s = 10 menit
+MAX_GAME_RUNNING_WAIT = 120  # 120 * 5s = 10 menit
+MAX_WAITING_SECONDS = 600    # cutloss waiting 10 menit
+
+# dashboard
 SPIN = ["|", "/", "-", "\\"]
 
-# ================ DASHBOARD (STABLE FOR SCREEN) ================
 def dash_render(header1, header2, bot_lines):
-    sys.stdout.write("\033[H")   # home
-    sys.stdout.write("\033[2J")  # clear
+    sys.stdout.write("\033[H")   # home [web:115]
+    sys.stdout.write("\033[2J")  # clear [web:115]
     sys.stdout.write(header1 + "\n")
     sys.stdout.write(header2 + "\n")
     for ln in bot_lines:
@@ -74,11 +81,29 @@ def safe_json(resp):
     except Exception:
         return {"_status": getattr(resp, "status_code", None), "_raw": getattr(resp, "text", "")}
 
+def load_blacklist():
+    if os.path.exists(BLACKLIST_FILE):
+        try:
+            with open(BLACKLIST_FILE, "r") as f:
+                return set(json.load(f))
+        except Exception:
+            return set()
+    return set()
+
+def save_blacklist(bl):
+    with open(BLACKLIST_FILE, "w") as f:
+        json.dump(sorted(list(bl)), f, indent=2)
+
+def blacklist_add(bl, gid):
+    if gid:
+        bl.add(gid)
+        save_blacklist(bl)
+
 def get_account_info(api_key):
     r = requests.get(
         f"{BASE_URL}/accounts/me",
         headers={"X-API-Key": api_key},
-        timeout=10
+        timeout=INFO_TIMEOUT
     )
     return safe_json(r).get("data", {})
 
@@ -101,27 +126,40 @@ def save_payload(acc, payload):
     with open(PAYLOAD_BACKUP, "w") as f:
         json.dump(data, f, indent=2)
 
-# ---- IMPORTANT FIX: skip full games ----
-def pick_target_game(headers):
-    r = requests.get(f"{BASE_URL}/games?status=waiting", timeout=10)
+def reset_account(acc):
+    acc["gameId"] = None
+    acc["agentId"] = None
+    acc["stateWait"] = 0
+
+# ---- FINAL: pick only FREE, skip full, skip blacklisted ----
+def pick_target_game(headers, blacklist):
+    r = requests.get(f"{BASE_URL}/games?status=waiting", timeout=INFO_TIMEOUT)
     games = safe_json(r).get("data", []) or []
 
     for g in games:
+        gid = g.get("id")
+        if gid in blacklist:
+            continue
+
+        if g.get("entryType") != "free":
+            continue
+
         mc = g.get("maxAgents")
         ac = g.get("agentCount")
-        if mc is None or ac is None:
-            return g
-        if ac < mc:
-            return g
+        if mc is not None and ac is not None and ac >= mc:
+            continue
 
-    r = requests.post(f"{BASE_URL}/games", headers=headers, timeout=10)
+        return g
+
+    r = requests.post(f"{BASE_URL}/games", headers=headers, timeout=INFO_TIMEOUT)
     return safe_json(r).get("data")
 
-def wait_game_running(game_id, status_map):
+def wait_game_running(game_id, status_map, blacklist):
+    start = time.time()
     loops = 0
     while True:
         loops += 1
-        r = requests.get(f"{BASE_URL}/games/{game_id}", timeout=10)
+        r = requests.get(f"{BASE_URL}/games/{game_id}", timeout=INFO_TIMEOUT)
         res = safe_json(r)
         data = res.get("data", {})
         status = data.get("status")
@@ -134,8 +172,16 @@ def wait_game_running(game_id, status_map):
         if status == "running":
             return True, data
         if status in ("finished", "cancelled"):
+            blacklist_add(blacklist, game_id)
             return False, data
+
+        # cutloss waiting too long => blacklist
+        if status == "waiting" and (time.time() - start) > MAX_WAITING_SECONDS:
+            blacklist_add(blacklist, game_id)
+            return False, data
+
         if loops >= MAX_GAME_RUNNING_WAIT:
+            blacklist_add(blacklist, game_id)
             return False, data
 
         time.sleep(STATE_WAIT_SLEEP)
@@ -147,7 +193,6 @@ def weighted_choice(choices):
     return random.choices(actions, weights=weights, k=1)[0]
 
 def get_smart_action(hp, ep, atk, defense, turn):
-    # turn is int (we enforce it)
     if hp <= CRITICAL_HP:
         return {"type": "rest"}
     if ep <= CRITICAL_EP:
@@ -212,19 +257,23 @@ status_map = {
     for acc in accounts
 }
 
+blacklist = load_blacklist()
+
 spin_i = 0
 target_game_id = ""
 
-# clear once at start
 sys.stdout.write("\033[H\033[2J")
 sys.stdout.flush()
 
 while True:
     try:
+        # heartbeat
         render_all(accounts, status_map, spin_i, target_game_id); spin_i += 1
 
+        # pick one target game for ALL
         first_headers = {"X-API-Key": accounts[0]["apiKey"]}
-        game = pick_target_game(first_headers)
+        game = pick_target_game(first_headers, blacklist)
+
         if not game:
             for acc in accounts:
                 status_map[acc["name"]]["note"] = "ERR: no game"
@@ -236,11 +285,17 @@ while True:
         for acc in accounts:
             status_map[acc["name"]]["note"] = "target set"
 
-        ok, _ = wait_game_running(target_game_id, status_map)
+        ok, gdata = wait_game_running(target_game_id, status_map, blacklist)
         if not ok:
             for acc in accounts:
-                status_map[acc["name"]]["note"] = "wait game..."
+                status_map[acc["name"]]["note"] = "cutloss/blacklist, repick"
             render_all(accounts, status_map, spin_i, target_game_id); spin_i += 1
+
+            # reset all to allow new pick next loop
+            for a in accounts:
+                reset_account(a)
+            save_accounts(accounts)
+
             time.sleep(2)
             continue
 
@@ -260,18 +315,19 @@ while True:
                         f"{BASE_URL}/games/{acc['gameId']}/agents/register",
                         headers=headers,
                         json={"name": acc["name"]},
-                        timeout=10
+                        timeout=ACTION_TIMEOUT
                     )
                 )
                 agent = resp.get("data")
 
                 if not agent or not agent.get("id"):
-                    # IMPORTANT FIX: reset if register fails (full game, rate limit, etc.)
-                    acc["gameId"] = None
-                    acc["agentId"] = None
-                    acc["stateWait"] = 0
-                    save_accounts(accounts)
+                    # blacklist this game if register fails (often full/rules)
+                    blacklist_add(blacklist, target_game_id)
+
                     status_map[acc["name"]]["note"] = f"register FAIL http={resp.get('_status','')} {str(resp.get('_raw',''))[:40]}"
+                    reset_account(acc)
+                    save_accounts(accounts)
+
                     render_all(accounts, status_map, spin_i, target_game_id); spin_i += 1
                     time.sleep(1)
                     continue
@@ -284,7 +340,10 @@ while True:
 
         # action loop
         while True:
-            game_info = safe_json(requests.get(f"{BASE_URL}/games/{target_game_id}", timeout=10)).get("data", {})
+            game_info = safe_json(
+                requests.get(f"{BASE_URL}/games/{target_game_id}", timeout=INFO_TIMEOUT)
+            ).get("data", {})
+
             status = game_info.get("status")
             turn_raw = game_info.get("turn", 0)
             turn = int(turn_raw) if str(turn_raw).isdigit() else 0
@@ -294,22 +353,20 @@ while True:
                 status_map[acc["name"]]["turn"] = turn_raw
 
             if status in ("finished", "cancelled"):
+                blacklist_add(blacklist, target_game_id)
                 for acc in accounts:
-                    acc["gameId"] = None
-                    acc["agentId"] = None
-                    acc["stateWait"] = 0
+                    reset_account(acc)
                     status_map[acc["name"]]["note"] = f"END: {status}"
                 save_accounts(accounts)
                 render_all(accounts, status_map, spin_i, target_game_id); spin_i += 1
-                time.sleep(5)
+                time.sleep(2)
                 break
 
             for acc in accounts:
-                # GUARD: don't call state if agentId is null
+                # guard
                 if not acc.get("agentId"):
                     status_map[acc["name"]]["note"] = "no agentId, rejoin"
-                    acc["gameId"] = None
-                    acc["stateWait"] = 0
+                    reset_account(acc)
                     save_accounts(accounts)
                     render_all(accounts, status_map, spin_i, target_game_id); spin_i += 1
                     continue
@@ -322,7 +379,7 @@ while True:
                 r = requests.get(
                     f"{BASE_URL}/games/{acc['gameId']}/agents/{acc['agentId']}/state",
                     headers=headers,
-                    timeout=10
+                    timeout=ACTION_TIMEOUT
                 )
                 res = safe_json(r)
 
@@ -333,11 +390,9 @@ while True:
                     render_all(accounts, status_map, spin_i, target_game_id); spin_i += 1
 
                     if acc["stateWait"] >= MAX_STATE_WAIT:
-                        acc["gameId"] = None
-                        acc["agentId"] = None
-                        acc["stateWait"] = 0
-                        save_accounts(accounts)
                         status_map[acc["name"]]["note"] = "TIMEOUT reset"
+                        reset_account(acc)
+                        save_accounts(accounts)
                         render_all(accounts, status_map, spin_i, target_game_id); spin_i += 1
 
                     time.sleep(STATE_WAIT_SLEEP)
@@ -374,7 +429,7 @@ while True:
                     f"{BASE_URL}/games/{acc['gameId']}/agents/{acc['agentId']}/action",
                     headers=headers,
                     json={"action": action},
-                    timeout=10
+                    timeout=ACTION_TIMEOUT
                 )
                 res2 = safe_json(r)
 
