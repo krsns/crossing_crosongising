@@ -16,7 +16,7 @@ INFO_TIMEOUT = (3, 12)
 
 MAX_STATE_WAIT = 120         # 120 * 5s = 10 menit
 MAX_GAME_RUNNING_WAIT = 120  # 120 * 5s = 10 menit
-MAX_WAITING_SECONDS = 600    # cutloss waiting 10 menit
+MAX_WAITING_SECONDS = 3600    # cutloss waiting 10 menit
 
 # dashboard
 SPIN = ["|", "/", "-", "\\"]
