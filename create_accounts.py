@@ -8,12 +8,12 @@ print("=" * 50)
 prefix = input("Masukkan prefix nama bot (contoh: vps2_ atau userA_): ").strip()
 if not prefix:
     prefix = "bot_"
-    print(f"⚠ Using default prefix: {prefix}")
+    print(f"âš  Using default prefix: {prefix}")
 
 start = input("Mulai dari nomor berapa? (default 1): ").strip()
 start = int(start) if start else 1
 
-print(f"\n📋 Will create {TOTAL_ACCOUNTS} accounts: {prefix}{start} to {prefix}{start + TOTAL_ACCOUNTS - 1}")
+print(f"\nðŸ“‹ Will create {TOTAL_ACCOUNTS} accounts: {prefix}{start} to {prefix}{start + TOTAL_ACCOUNTS - 1}")
 confirm = input("Continue? (y/n): ").strip().lower()
 if confirm != 'y':
     print("Cancelled.")
@@ -22,7 +22,7 @@ if confirm != 'y':
 accounts = []
 failed = []
 
-print(f"\n🚀 Starting account creation...\n")
+print(f"\nðŸš€ Starting account creation...\n")
 
 for i in range(TOTAL_ACCOUNTS):
     name = f"{prefix}{start + i}"
@@ -38,7 +38,7 @@ for i in range(TOTAL_ACCOUNTS):
         
         # Check HTTP status
         if r.status_code not in [200, 201]:
-            print(f"❌ HTTP {r.status_code}")
+            print(f"âŒ HTTP {r.status_code}")
             print(f"    Response: {r.text[:100]}")
             failed.append(name)
             time.sleep(2)
@@ -49,14 +49,14 @@ for i in range(TOTAL_ACCOUNTS):
         
         # Check response format
         if "data" not in response:
-            print(f"❌ No 'data' field")
+            print(f"âŒ No 'data' field")
             print(f"    Response: {response}")
             failed.append(name)
             time.sleep(2)
             continue
         
         if "apiKey" not in response["data"]:
-            print(f"❌ No 'apiKey' field")
+            print(f"âŒ No 'apiKey' field")
             print(f"    Response: {response}")
             failed.append(name)
             time.sleep(2)
@@ -66,7 +66,7 @@ for i in range(TOTAL_ACCOUNTS):
         
         # Verify API key format
         if not api_key or len(api_key) < 10:
-            print(f"❌ Invalid API key: {api_key}")
+            print(f"âŒ Invalid API key: {api_key}")
             failed.append(name)
             time.sleep(2)
             continue
@@ -78,34 +78,34 @@ for i in range(TOTAL_ACCOUNTS):
             "agentId": None
         })
         
-        print(f"✅ OK - Key: {api_key[:15]}...")
+        print(f"âœ… OK - Key: {api_key[:15]}...")
         time.sleep(2)  # Rate limit protection
         
     except requests.exceptions.Timeout:
-        print(f"❌ Timeout (>20s)")
+        print(f"âŒ Timeout (>20s)")
         failed.append(name)
         time.sleep(5)
         
     except requests.exceptions.ConnectionError:
-        print(f"❌ Connection failed")
+        print(f"âŒ Connection failed")
         print(f"    Check BASE_URL: {BASE_URL}")
         failed.append(name)
         time.sleep(5)
         
     except json.JSONDecodeError:
-        print(f"❌ Invalid JSON response")
+        print(f"âŒ Invalid JSON response")
         print(f"    Raw: {r.text[:100]}")
         failed.append(name)
         time.sleep(2)
         
     except KeyError as e:
-        print(f"❌ Missing key: {e}")
+        print(f"âŒ Missing key: {e}")
         print(f"    Response: {response}")
         failed.append(name)
         time.sleep(2)
         
     except Exception as e:
-        print(f"❌ Error: {type(e).__name__} - {e}")
+        print(f"âŒ Error: {type(e).__name__} - {e}")
         failed.append(name)
         time.sleep(2)
 
@@ -113,9 +113,9 @@ for i in range(TOTAL_ACCOUNTS):
 print("\n" + "=" * 50)
 print("SUMMARY")
 print("=" * 50)
-print(f"✅ Success: {len(accounts)}/{TOTAL_ACCOUNTS}")
+print(f"âœ… Success: {len(accounts)}/{TOTAL_ACCOUNTS}")
 if failed:
-    print(f"❌ Failed: {len(failed)}/{TOTAL_ACCOUNTS}")
+    print(f"âŒ Failed: {len(failed)}/{TOTAL_ACCOUNTS}")
     print(f"   Failed names: {', '.join(failed)}")
 
 # Save if any success
@@ -125,9 +125,9 @@ if accounts:
     try:
         with open("accounts.json", "r") as f:
             existing = json.load(f)
-        print(f"\n📂 Found {len(existing)} existing accounts")
+        print(f"\nðŸ“‚ Found {len(existing)} existing accounts")
     except FileNotFoundError:
-        print(f"\n📂 Creating new accounts.json")
+        print(f"\nðŸ“‚ Creating new accounts.json")
     
     # Merge (avoid duplicates by name)
     existing_names = {acc["name"] for acc in existing}
@@ -144,15 +144,15 @@ if accounts:
         with open("accounts_backup.json", "w") as f:
             json.dump(existing, f, indent=2)
         
-        print(f"💾 Saved {len(new_accounts)} new accounts")
-        print(f"📊 Total accounts now: {len(existing)}")
-        print("\n✅ ALL DONE!")
-        print("🔐 API Keys saved to: accounts.json")
-        print("💾 Backup saved to: accounts_backup.json")
+        print(f"ðŸ’¾ Saved {len(new_accounts)} new accounts")
+        print(f"ðŸ“Š Total accounts now: {len(existing)}")
+        print("\nâœ… ALL DONE!")
+        print("ðŸ” API Keys saved to: accounts.json")
+        print("ðŸ’¾ Backup saved to: accounts_backup.json")
     else:
-        print(f"\n⚠ All accounts already exist in accounts.json")
+        print(f"\nâš  All accounts already exist in accounts.json")
 else:
-    print("\n❌ NO ACCOUNTS CREATED")
+    print("\nâŒ NO ACCOUNTS CREATED")
     print("   Check:")
     print(f"   1. BASE_URL is correct: {BASE_URL}")
     print(f"   2. API endpoint accepts POST /accounts")
